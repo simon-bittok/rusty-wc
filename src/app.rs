@@ -1,4 +1,9 @@
-use std::{io::Read, os::unix::fs::MetadataExt, path::PathBuf};
+use std::{
+    fs::File,
+    io::{BufReader, Read},
+    os::unix::fs::MetadataExt,
+    path::PathBuf,
+};
 
 use clap::Parser;
 
@@ -59,48 +64,81 @@ impl App {
         show_bytes: bool,
         show_chars: bool,
     ) -> Result<(), std::io::Error> {
-        let metadata = match std::fs::metadata(filepath) {
-            Ok(md) => md,
-            Err(e) => match e.kind() {
-                std::io::ErrorKind::NotFound => {
-                    eprintln!("ccwc: {} No such file or directory", filepath.display());
-                    return Err(e);
-                }
-                _ => {
-                    eprintln!("ccwc: {e}");
-                    return Err(e);
-                }
-            },
-        };
+        let metadata = std::fs::metadata(filepath)?;
 
-        // Read file contents only if we need to count lines, words, or chars
-        let contents = if show_lines || show_words || show_chars {
-            match std::fs::read_to_string(filepath) {
-                Ok(contents) => Some(contents),
-                Err(e) => {
-                    eprintln!("ccwc: {} {} ", filepath.display(), e);
-                    return Err(e);
+        let needs_contents = show_lines || show_words || show_chars;
+
+        let (line_count, word_count, char_count) = if needs_contents {
+            let file = File::open(filepath)?;
+            let mut reader = BufReader::new(file);
+
+            let mut buffer = Vec::new();
+
+            reader.read_to_end(&mut buffer)?;
+
+            // Count lines by counting newline bytes
+            let lines = if show_lines {
+                buffer.iter().filter(|&&b| b == b'\n').count()
+            } else {
+                0
+            };
+
+            let (words, chars) = if show_words || show_chars {
+                match std::str::from_utf8(&buffer) {
+                    Ok(contents) => {
+                        let w = if show_words {
+                            contents.split_whitespace().count()
+                        } else {
+                            0
+                        };
+
+                        let c = if show_chars {
+                            contents.chars().count()
+                        } else {
+                            0
+                        };
+
+                        (w, c)
+                    }
+                    Err(_) => {
+                        // If UTF-8 conversion fails, use this fallback
+                        // The real wc would use locale-specific encoding here
+                        let w = if show_words {
+                            buffer
+                                .split(|b| b.is_ascii_whitespace())
+                                .filter(|s| !s.is_empty())
+                                .count()
+                        } else {
+                            0
+                        };
+
+                        // Treat every byte as one character
+                        let c = if show_chars { buffer.len() } else { 0 };
+
+                        (w, c)
+                    }
                 }
-            }
+            } else {
+                (0, 0)
+            };
+
+            (lines, words, chars)
         } else {
-            None
+            (0, 0, 0)
         };
 
         // Build the output based on what is needed to be shown.
         let mut output = String::new();
 
-        if show_lines && let Some(ref contents) = contents {
-            output.push_str(&format!("{} ", contents.lines().count()));
+        if show_lines {
+            output.push_str(&format!("{} ", line_count));
         }
-
-        if show_words && let Some(ref contents) = contents {
-            output.push_str(&format!("{} ", contents.split_whitespace().count()));
+        if show_words {
+            output.push_str(&format!("{} ", word_count));
         }
-
-        if show_chars && let Some(ref contents) = contents {
-            output.push_str(&format!("{} ", contents.chars().count()));
+        if show_chars {
+            output.push_str(&format!("{} ", char_count));
         }
-
         if show_bytes {
             output.push_str(&format!("{} ", metadata.size()));
         }
@@ -120,27 +158,72 @@ impl App {
         show_bytes: bool,
         show_chars: bool,
     ) -> Result<(), std::io::Error> {
-        let mut contents = String::new();
-        std::io::stdin().read_to_string(&mut contents)?;
+        let f = std::io::stdin();
+        let mut reader = BufReader::new(f);
+
+        let mut buffer = Vec::new();
+        reader.read_to_end(&mut buffer)?;
 
         let mut output = String::new();
 
+        let lines = if show_lines {
+            buffer.iter().filter(|&&b| b == b'\n').count()
+        } else {
+            0
+        };
+
+        let (words, chars) = if show_words || show_chars {
+            match std::str::from_utf8(&buffer) {
+                Ok(contents) => {
+                    let w = if show_words {
+                        contents.split_whitespace().count()
+                    } else {
+                        0
+                    };
+
+                    let c = if show_chars {
+                        contents.chars().count()
+                    } else {
+                        0
+                    };
+
+                    (w, c)
+                }
+                Err(_) => {
+                    let w = if show_words {
+                        buffer
+                            .split(|b| b.is_ascii_whitespace())
+                            .filter(|s| !s.is_empty())
+                            .count()
+                    } else {
+                        0
+                    };
+
+                    let c = if show_chars { buffer.len() } else { 0 };
+
+                    (w, c)
+                }
+            }
+        } else {
+            (0, 0)
+        };
+
         if show_lines {
-            output.push_str(&format!("{} ", contents.lines().count()));
+            output.push_str(&format!("{} ", lines));
         }
 
         if show_words {
-            output.push_str(&format!("{} ", contents.split_whitespace().count()));
+            output.push_str(&format!("{} ", words));
         }
 
         if show_chars {
-            output.push_str(&format!("{} ", contents.chars().count()));
+            output.push_str(&format!("{} ", chars));
         }
 
         if show_bytes {
             // For stdin, we count bytes from the string we read
             // contents.len() gives us the byte count
-            output.push_str(&format!("{} ", contents.len()));
+            output.push_str(&format!("{} ", buffer.len()));
         }
 
         // No filename at the end since stdin
